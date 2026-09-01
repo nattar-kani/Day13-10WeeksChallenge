@@ -6,7 +6,7 @@ For Day 13, I containerized the entire stack using Docker Compose and added both
 
 ## Architecture
 
-'''mermaid
+```mermaid
 flowchart LR
     A[Public APIs] --> B[DataPipe Container]
     B --> C[Async Extraction]
@@ -22,7 +22,7 @@ flowchart LR
     H --> J[(Persistent Volume)]
 
     F --> G
-'''
+```
     
 ### Data Flow
 
