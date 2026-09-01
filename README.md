@@ -1,126 +1,79 @@
-# DataPipe — Async Data Ingestion Pipeline
+# Containerizing an Async Data Pipeline with PostgreSQL & MongoDB
 
-An asynchronous ETL pipeline built with **Python, HTTPX, Pydantic, asyncio, and SQLite**.
+Built a production-style asynchronous data ingestion pipeline that fetches data from multiple public APIs, validates records with Pydantic, handles transient failures with retry and exponential backoff, and captures invalid records for later investigation.
 
-DataPipe extracts data from multiple public APIs concurrently, validates incoming records with Pydantic, transforms them into a clean structure, and loads them into SQLite. Failed records are preserved separately, while retry and exponential backoff improve resilience against temporary API failures.
+For Day 13, I containerized the entire stack using Docker Compose and added both PostgreSQL and MongoDB as storage layers. PostgreSQL stores the validated and transformed relational data, while MongoDB preserves the raw API documents.
 
-The project focuses on applying **production-oriented data engineering patterns** rather than simply fetching API data.
+## Architecture
 
+```mermaid
+flowchart TD
+    A[External APIs] --> B[DataPipe]
+
+    B --> C[Async Extraction]
+    C --> D[Pydantic Validation]
+
+    D -->|Valid Data| E[Transformation]
+    D -->|Invalid Data| F[Failed Records]
+
+    E --> G[PostgreSQL]
+    E --> H[MongoDB]
+
+    G --> I[postgres_data Volume]
+    H --> J[mongo_data Volume]
+
+    F --> G
+
+    subgraph Docker Compose Network
+        B
+        C
+        D
+        E
+        F
+        G
+        H
+    end
+```
+
+### Data Flow
+
+```text
+External APIs
+     │
+     ▼
+┌───────────────────┐
+│     DataPipe      │
+│    Container      │
+└─────────┬─────────┘
+          │
+          ▼
+   Async Extraction
+          │
+          ▼
+   Pydantic Validation
+       │       │
+   Valid       Invalid
+      │           │
+      ▼           ▼
+ Transform    Failed Records
+      │
+   ┌──┴───────────┐
+   │              │
+   ▼              ▼
+PostgreSQL      MongoDB
+   │              │
+   ▼              ▼
+Volume          Volume
+```
 ---
 
-## 🚀 Project Overview
+## Architecture Decisions
 
-DataPipe ingests data from two public APIs:
+### Why Async?
 
-* Users API
-* Posts API
+The pipeline retrieves data from multiple APIs, making it primarily I/O-bound.
 
-The pipeline follows:
-
-```text
-                 ┌──────────────┐
-                 │  Public APIs │
-                 └──────┬───────┘
-                        │
-                  Async Extraction
-                        │
-                 ┌──────┴───────┐
-                 │              │
-              Users           Posts
-                 │              │
-                 └──────┬───────┘
-                        │
-                 Pydantic Validation
-                        │
-              ┌─────────┴─────────┐
-              │                   │
-            Valid               Invalid
-              │                   │
-          Transform        Failed Records
-              │                   │
-              └─────────┬─────────┘
-                        │
-                   SQLite Load
-```
-
-### ETL Flow
-
-```text
-Extract → Validate → Transform → Load
-```
-
-with additional reliability mechanisms:
-
-```text
-Retry + Exponential Backoff
-Failed-Record Handling
-Idempotent Loading
-Configuration Management
-```
-
----
-
-# 🏗️ Architecture
-
-The project separates responsibilities across several modules:
-
-```text
-datapipe/
-│
-├── main.py
-├── config.py
-├── models.py
-├── storage.py
-├── .env
-├── .gitignore
-├── requirements.txt
-└── datapipe.db
-```
-
-### `main.py`
-
-Responsible for orchestrating the complete pipeline:
-
-* API extraction
-* Concurrent execution
-* Validation
-* Transformation
-* Loading
-* Failed-record handling
-
-### `models.py`
-
-Contains Pydantic schemas used to validate incoming API data.
-
-### `config.py`
-
-Manages application configuration using Pydantic Settings and `.env`.
-
-### `storage.py`
-
-Handles SQLite database creation and data insertion/upsert operations.
-
-### `.env`
-
-Stores environment-specific configuration such as API URLs.
-
-It is intentionally excluded from version control.
-
----
-
-# ⚡ Why Async?
-
-The pipeline is **I/O-bound**, not CPU-bound.
-
-The application spends most of its time waiting for:
-
-* Network connections
-* API responses
-* Response data
-
-Instead of waiting for one API request to finish before starting another, asynchronous execution allows multiple requests to make progress concurrently.
-
-For example:
+Instead of waiting for the users API to complete before requesting the posts API, the pipeline uses `asyncio.gather()` to fetch both concurrently.
 
 ```python
 users_task = fetch(client, settings.users_url)
@@ -132,243 +85,84 @@ users_data, posts_data = await asyncio.gather(
 )
 ```
 
-Conceptually:
+This allows independent network requests to make progress concurrently and reduces unnecessary waiting.
 
-```text
-Sequential
-
-Users API ────────────────>
-                          ↓
-Posts API ────────────────>
-
-Total ≈ Users time + Posts time
-```
-
-With async:
-
-```text
-Users API ────────────────>
-Posts API ────────────────>
-
-Total ≈ longest operation
-```
-
-This makes async particularly useful for applications that make many network requests.
+Async was chosen because the bottleneck is network I/O rather than CPU computation.
 
 ---
 
-# 🔄 Retry + Exponential Backoff
+### Why Pydantic Validation?
 
-Network requests can fail temporarily because of:
+External API data cannot be assumed to always match the application's expected schema.
 
-* Timeouts
-* Temporary server problems
-* Network instability
-* Rate limiting
-* Transient HTTP failures
-
-DataPipe retries timeout failures up to three times.
-
-The waiting period increases exponentially:
+Pydantic models provide a clear validation boundary between extraction and loading.
 
 ```text
-Attempt 1 → failure
-       ↓
-    wait 1 sec
-
-Attempt 2 → failure
-       ↓
-    wait 2 sec
-
-Attempt 3 → failure
-       ↓
-    give up
+API Response
+     │
+     ▼
+Pydantic Validation
+     │
+ ┌───┴────┐
+ │        │
+Valid    Invalid
+ │        │
+ ▼        ▼
+Load    Failed Records
 ```
 
-The implementation uses:
+Invalid records are not allowed to silently enter the main database tables.
 
-```python
-wait_time = 2 ** attempt
-```
-
-This avoids immediately hammering an API when a temporary failure occurs.
+Instead, validation errors are captured together with the original record.
 
 ---
 
-# 🛡️ Pydantic Validation
+### Retry and Exponential Backoff
 
-External APIs cannot always be assumed to return perfectly structured data.
+Network requests can fail temporarily because of timeouts or transient HTTP errors.
 
-DataPipe validates incoming records before loading them into the database.
+The extraction function retries timeout failures up to three times.
 
-For example:
-
-```python
-validated_user = User(**user)
-```
-
-If validation succeeds:
+The retry delay follows exponential backoff:
 
 ```text
-API record
-    ↓
-Pydantic
-    ↓
-Valid
-    ↓
-Transform
-    ↓
-Database
+Attempt 1 → immediate
+Attempt 2 → wait 1 second
+Attempt 3 → wait 2 seconds
 ```
 
-If validation fails:
-
-```text
-API record
-    ↓
-Pydantic
-    ↓
-ValidationError
-    ↓
-Failed Records
-```
-
-This prevents malformed records from silently entering the database.
+This avoids continuously hitting an unavailable API and gives transient failures time to recover.
 
 ---
 
-# 🚨 Failed-Record Handling
+### Failed Record Handling
 
-A failed record should not necessarily cause the entire pipeline to fail.
+Invalid records are separated from valid records instead of stopping the entire pipeline.
 
-Instead of discarding invalid data, DataPipe stores it in a dedicated table:
+Each failed record stores:
 
-```text
-failed_records
-```
-
-Each failed record contains information such as:
-
-```text
-source
-record
-error
-```
+* Source
+* Original record
+* Validation error
 
 Example:
 
 ```text
-source: users
-
-record:
-{
-    "id": "INVALID",
-    "name": "Example User"
-}
-
-error:
-validation error...
+failed_records
+├── source
+├── record
+└── error
 ```
 
-This provides an audit trail and makes failed records available for debugging or future reprocessing.
-
-The principle is:
-
-> **Don't lose bad data just because it cannot currently be processed.**
+This allows the pipeline to continue processing valid data while preserving enough information to investigate bad records later.
 
 ---
 
-# 🔁 Idempotent Loading
+### Why PostgreSQL?
 
-A production ingestion pipeline may run repeatedly.
+PostgreSQL is used for the cleaned and structured representation of the data.
 
-If the same API data is processed multiple times, a simple `INSERT` could create duplicates.
-
-DataPipe addresses this using primary keys and SQLite UPSERT logic.
-
-For example:
-
-```sql
-id INTEGER PRIMARY KEY
-```
-
-combined with:
-
-```sql
-ON CONFLICT(id) DO UPDATE SET
-    name = excluded.name,
-    email = excluded.email
-```
-
-The behavior becomes:
-
-```text
-First run
-    ↓
-Record doesn't exist
-    ↓
-INSERT
-
-
-Second run
-    ↓
-Record already exists
-    ↓
-UPDATE
-```
-
-Therefore, running the pipeline multiple times does not continuously create duplicate records.
-
-This makes the loading process **idempotent**.
-
-> An idempotent pipeline can be safely re-run without producing unintended duplicate records.
-
----
-
-# 🔐 Configuration & Secrets Management
-
-API configuration is separated from application code.
-
-Instead of hardcoding configuration:
-
-```python
-users_url = "https://..."
-```
-
-DataPipe uses:
-
-```text
-.env
- ↓
-Pydantic Settings
- ↓
-Application
-```
-
-Example `.env`:
-
-```env
-USERS_URL=https://jsonplaceholder.typicode.com/users
-POSTS_URL=https://jsonplaceholder.typicode.com/posts
-```
-
-The `.env` file is excluded from Git:
-
-```gitignore
-.env
-```
-
-This pattern allows different environments to provide different configuration without changing application code.
-
-It also provides a safe place for future secrets such as API keys and database credentials.
-
----
-
-# 🗄️ Database
-
-SQLite is used as the destination database for this project.
-
-The pipeline creates:
+The relational structure is appropriate for entities such as:
 
 ```text
 users
@@ -376,107 +170,280 @@ posts
 failed_records
 ```
 
-The `users` and `posts` tables use primary keys to support idempotent loading.
+It also provides constraints such as primary keys and supports idempotent loading through:
 
-The `failed_records` table provides a separate path for records that fail validation.
+```sql
+ON CONFLICT (id) DO NOTHING
+```
 
 ---
 
-# 🧪 Example Run
+### Why MongoDB?
 
-Running:
+MongoDB is used to preserve the raw API documents.
 
-```bash
-python main.py
-```
+API responses can contain nested and flexible structures that do not necessarily need to be flattened immediately.
 
-produces output similar to:
+For example, a raw user document can retain:
 
 ```text
-Valid users: 10
-Failed users: 0
-Valid posts: 100
-Failed posts: 0
-Data loaded successfully!
+id
+name
+username
+email
+address
+company
+...
 ```
 
-After repeated executions, the database remains consistent rather than continuously accumulating duplicate users and posts.
+This gives the pipeline two useful representations:
+
+```text
+PostgreSQL → validated, transformed, structured data
+
+MongoDB    → raw API documents
+```
+
+This also demonstrates a practical SQL vs NoSQL architecture rather than using both databases simply for demonstration purposes.
 
 ---
 
-# ⚙️ Installation
+### Idempotent Loading
 
-Clone the repository:
+The pipeline is designed so that running it multiple times does not continuously create duplicate records.
+
+PostgreSQL uses:
+
+```sql
+ON CONFLICT (id) DO NOTHING
+```
+
+MongoDB uses:
+
+```python
+UpdateOne(
+    {"id": record["id"]},
+    {"$set": record},
+    upsert=True
+)
+```
+
+Therefore:
+
+```text
+First run
+    ↓
+Insert record
+
+Second run
+    ↓
+Existing record found
+    ↓
+Update / ignore duplicate
+```
+
+This is important for pipelines because jobs may be retried or rerun after partial failures.
+
+---
+
+## Docker Architecture
+
+The complete application runs through Docker Compose.
+
+The stack contains:
+
+```text
+DataPipe
+PostgreSQL
+MongoDB
+```
+
+Docker Compose creates a shared network allowing services to communicate using service names.
+
+For example:
+
+```text
+DataPipe → postgres:5432
+DataPipe → mongo:27017
+```
+
+The application does not need to know the individual container IP addresses.
+
+---
+
+### Docker Image vs Container
+
+The DataPipe Docker image contains the application's runtime environment and dependencies.
+
+The container is the running instance created from that image.
+
+```text
+Dockerfile
+     │
+     ▼
+Docker Image
+     │
+     ▼
+DataPipe Container
+```
+
+This makes the application environment reproducible across machines.
+
+---
+
+### Docker Volumes
+
+Database containers are disposable, but database data should not be.
+
+Therefore PostgreSQL and MongoDB use named Docker volumes:
+
+```text
+PostgreSQL
+     │
+     ▼
+postgres_data
+
+MongoDB
+     │
+     ▼
+mongo_data
+```
+
+The volumes exist independently of the containers.
+
+This means:
+
+```text
+docker compose down
+        ↓
+Containers removed
+        ↓
+Volumes remain
+        ↓
+docker compose up
+        ↓
+New containers
+        ↓
+Existing data restored
+```
+
+The persistence test was performed successfully for both databases.
+
+> Note: `docker compose down -v` removes the volumes and therefore deletes the persisted database data.
+
+---
+
+## Reproducibility
+
+The complete stack can be started with:
 
 ```bash
-git clone <your-repository-url>
-cd <repository-name>
+docker compose up
 ```
 
-Create a virtual environment:
+The infrastructure, networking, database services, dependencies, and application runtime are defined as code.
+
+This reduces environment-specific setup and makes the project easier for another developer to reproduce.
+
+---
+
+## Running the Project
+
+### Prerequisites
+
+* Docker Desktop
+* Docker Compose
+
+### Start the complete stack
 
 ```bash
-python -m venv day11-venv
+docker compose up
 ```
 
-Activate it on Windows:
-
-```powershell
-day11-venv\Scripts\activate
-```
-
-Install dependencies:
+Or run it in detached mode:
 
 ```bash
-pip install -r requirements.txt
+docker compose up -d
 ```
 
-Create a `.env` file:
-
-```env
-USERS_URL=https://jsonplaceholder.typicode.com/users
-POSTS_URL=https://jsonplaceholder.typicode.com/posts
-```
-
-Run the pipeline:
+### Check running services
 
 ```bash
-python main.py
+docker compose ps
+```
+
+### View application logs
+
+```bash
+docker compose logs datapipe
+```
+
+### Stop the stack
+
+```bash
+docker compose down
+```
+
+> Do not use `docker compose down -v` unless you intentionally want to remove the database volumes and their data.
+
+### Rebuild the application image
+
+```bash
+docker compose build datapipe
+```
+
+### Verify MongoDB
+
+```bash
+docker exec -it day13-mongo-1 mongosh
+```
+
+```javascript
+use datapipe
+db.users_raw.countDocuments()
+db.posts_raw.countDocuments()
+```
+
+### Verify PostgreSQL
+
+```bash
+docker exec -it day13-postgres-1 psql -U datapipe -d datapipe
+```
+
+```sql
+SELECT COUNT(*) FROM users;
+SELECT COUNT(*) FROM posts;
+SELECT COUNT(*) FROM failed_records;
 ```
 
 ---
 
-# 📦 Dependencies
+## Project Structure
 
-The project uses:
+```text
+Day 13/
+│
+├── main.py
+├── storage.py
+├── models.py
+├── config.py
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
+├── .dockerignore
+├── .gitignore
+└── README.md
+```
 
-* **HTTPX** — synchronous and asynchronous HTTP requests
-* **Pydantic** — data validation
-* **Pydantic Settings** — configuration management
-* **asyncio** — asynchronous task execution
-* **SQLite** — lightweight relational data storage
+### Responsibilities
 
----
-
-# 🧠 Engineering Concepts Demonstrated
-
-This project was built to explore practical concepts used in production data pipelines:
-
-* Asynchronous programming
-* I/O-bound concurrency
-* `asyncio.gather()`
-* HTTP clients
-* API ingestion
-* ETL architecture
-* Data validation
-* Pydantic models
-* Configuration management
-* Environment variables
-* Retry strategies
-* Exponential backoff
-* Error handling
-* Failed-record management
-* SQLite
-* Primary keys
-* UPSERT
-* Idempotent data ingestion
+| File                 | Responsibility                           |
+| -------------------- | ---------------------------------------- |
+| `main.py`            | Pipeline orchestration                   |
+| `models.py`          | Pydantic validation models               |
+| `storage.py`         | PostgreSQL and MongoDB operations        |
+| `config.py`          | Application configuration                |
+| `Dockerfile`         | DataPipe container image                 |
+| `docker-compose.yml` | Complete multi-container stack           |
+| `requirements.txt`   | Python dependencies                      |
+| `.dockerignore`      | Files excluded from Docker build context |

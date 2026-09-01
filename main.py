@@ -2,7 +2,7 @@ from config import settings
 import httpx
 from models import User, Post
 import asyncio
-from storage import create_db, insert_users, insert_posts, insert_failed_records
+from storage import create_db, insert_users, insert_posts, insert_failed_records, insert_raw_data
 from pydantic import ValidationError
 
 #extract
@@ -107,6 +107,8 @@ async def main():
         insert_users(users_transf)
         insert_posts(posts_transf)
 
+        insert_raw_data(users_data,posts_data)
+        
         failed_rec = failed_users+failed_posts
         if failed_rec:
             insert_failed_records(failed_rec)

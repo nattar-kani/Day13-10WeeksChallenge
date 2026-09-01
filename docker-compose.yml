@@ -1,0 +1,31 @@
+services:
+
+  datapipe: 
+    build: . 
+    env_file: 
+      - .env
+    depends_on:
+      - postgres
+      - mongo
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: datapipe
+      POSTGRES_PASSWORD: datapipe_password
+      POSTGRES_DB: datapipe
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes: 
+  postgres_data: 
+  mongo_data:

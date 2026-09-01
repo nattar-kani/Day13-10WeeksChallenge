@@ -1,102 +1,139 @@
-import sqlite3
+import psycopg
 import json
+from pymongo import MongoClient, UpdateOne
+
+
+def get_postgres_connection():
+    return psycopg.connect(
+        host="postgres",
+        port=5432,
+        user="datapipe",
+        password="datapipe_password",
+        dbname="datapipe"
+    )
+
+def get_mongo_connection():
+    client = MongoClient("mongodb://mongo:27017")
+    return client
 
 def create_db():
-    connection = sqlite3.connect("datapipe.db")
-    cursor = connection.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY,
-            name TEXT,
-            email TEXT)""")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS posts(
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER,
-            title TEXT)""")    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS failed_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT,
-            record TEXT,
-            error TEXT
-        )
-    """)    
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
 
-    connection.commit()
-    connection.close()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT,
+                    email TEXT
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS posts (
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER,
+                    title TEXT
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS failed_records (
+                    id SERIAL PRIMARY KEY,
+                    source TEXT,
+                    record TEXT,
+                    error TEXT
+                )
+            """)
+
+        conn.commit()
+
 
 def insert_users(users):
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
 
-    connection = sqlite3.connect("datapipe.db")
-    cursor = connection.cursor()
+            for user in users:
+                cursor.execute(
+                    """
+                    INSERT INTO users (id, name, email)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        user["id"],
+                        user["name"],
+                        user["email"]
+                    )
+                )
 
-    cursor.executemany(
-        """
-        INSERT INTO users (id, name, email)
-        VALUES (?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        email = excluded.email
-        """,
-        [
-            (
-                user["id"],
-                user["name"],
-                user["email"]
+        conn.commit()
+
+
+def insert_posts(posts):
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+
+            for post in posts:
+                cursor.execute(
+                    """
+                    INSERT INTO posts (id, user_id, title)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        post["id"],
+                        post["user_id"],
+                        post["title"]
+                    )
+                )
+
+        conn.commit()
+
+
+def insert_failed_records(records):
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+
+            for record in records:
+                cursor.execute(
+                    """
+                    INSERT INTO failed_records (source, record, error)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (
+                        record["source"],
+                        json.dumps(record["record"]),
+                        record["error"]
+                    )
+                )
+
+        conn.commit()
+
+def insert_raw_data(users,posts):
+    client = get_mongo_connection()
+    db = client["datapipe"]
+
+    users_coll = db["users_raw"]
+    posts_coll = db["posts_raw"]
+
+    if users:
+        user_operations = [
+            UpdateOne(
+                {"id": user["id"]},
+                {"$set": user},
+                upsert=True                
             )
             for user in users
         ]
-    )
-
-    connection.commit()
-    connection.close()
-
-def insert_posts(posts):
-
-    connection = sqlite3.connect("datapipe.db")
-    cursor = connection.cursor()
-
-    cursor.executemany(
-        """
-        INSERT INTO posts (id, user_id, title)
-        VALUES (?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-        user_id = excluded.user_id,
-        title = excluded.title
-        """,
-        [
-            (
-                post["id"],
-                post["user_id"],
-                post["title"]
+        users_coll.bulk_write(user_operations)
+    if posts:
+        post_operations = [
+            UpdateOne(
+                {"id": post["id"]},
+                {"$set": post},
+                upsert=True
             )
             for post in posts
         ]
-    )
-
-    connection.commit()
-    connection.close()
-
-def insert_failed_records(records):
-
-    connection = sqlite3.connect("datapipe.db")
-    cursor = connection.cursor()
-
-    cursor.executemany(
-        """
-        INSERT INTO failed_records (source, record, error)
-        VALUES (?, ?, ?)
-        """,
-        [
-            (
-                record["source"],
-                json.dumps(record["record"]),
-                record["error"]
-            )
-            for record in records
-        ]
-    )
-
-    connection.commit()
-    connection.close()
+        posts_coll.bulk_write(post_operations)
+    client.close()

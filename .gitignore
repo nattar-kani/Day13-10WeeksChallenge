@@ -1,5 +1,5 @@
 .env
-*.db
+.venv/
+venv/
 __pycache__/
 *.pyc
-day11-venv/
