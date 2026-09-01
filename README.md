@@ -6,35 +6,22 @@ For Day 13, I containerized the entire stack using Docker Compose and added both
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    A[External APIs] --> B[DataPipe]
-
+flowchart LR
+    A[Public APIs] --> B[DataPipe Container]
     B --> C[Async Extraction]
     C --> D[Pydantic Validation]
 
-    D -->|Valid Data| E[Transformation]
-    D -->|Invalid Data| F[Failed Records]
+    D -->|Valid| E[Transformation]
+    D -->|Invalid| F[Failed Records]
 
-    E --> G[PostgreSQL]
-    E --> H[MongoDB]
+    E --> G[(PostgreSQL)]
+    E --> H[(MongoDB)]
 
-    G --> I[postgres_data Volume]
-    H --> J[mongo_data Volume]
+    G --> I[(Persistent Volume)]
+    H --> J[(Persistent Volume)]
 
     F --> G
-
-    subgraph Docker Compose Network
-        B
-        C
-        D
-        E
-        F
-        G
-        H
-    end
-```
-
+    
 ### Data Flow
 
 ```text
